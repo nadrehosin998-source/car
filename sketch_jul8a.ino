@@ -186,6 +186,27 @@ TaskHandle_t Task1;
 TaskHandle_t Task2;
 
 // ==========================================
+// ===== Function Prototypes =====
+// ==========================================
+void saveSettings();
+void loadSettings();
+void start_led(int num, int duration_ms);
+void turnOffHighBeam();
+void stopDriverSeat();
+void stopAllSeats();
+void moveDriverSeat(bool forward, int seconds);
+void processUDPCommand(String command);
+void processRFCommand(String code);
+void checkESP8266Serial();
+void checkSeatMovements();
+void controlKeylessLed();
+void checkAccStatus();
+void checkHighBeamTimer();
+void checkToggleButton();
+void checkHoldButton();
+void beepRelay8(int count);
+
+// ==========================================
 // ===== HTML Pages =====
 // ==========================================
 
@@ -615,7 +636,7 @@ function updateStatus(){
     });
     fetch('/getbeepstatus').then(r=>r.json()).then(data=>{
         updateBeepStatus(data.enabled);
-        document.getElementById('beepDurationDisplay').innerText=data.duration+'ms';
+        document.getElementById('beepDurationDisplay').innerText=data.duration;
     });
     updateButtonStatus();
 }
@@ -677,11 +698,11 @@ h1{font-size:1.2rem;background:linear-gradient(135deg,#fff,#00e6ff);-webkit-back
 <script>
 function sendCommand(url){fetch(url).catch(e=>console.log(e));setTimeout(()=>{loadSettings();updatePCStatus();},500);}
 function loadSettings(){fetch('/getallsettings').then(r=>r.json()).then(data=>{document.getElementById('seatAutoEnable').checked=data.seatAuto;document.getElementById('backwardTime').value=data.seatBackward;document.getElementById('forwardTime').value=data.seatForward;document.getElementById('sleepTime').value=data.sleepTime;document.getElementById('wakeTime').value=data.wakeTime;document.getElementById('ldrEnabled').checked=data.ldrEnabled;document.getElementById('thOn').value=data.thOn;document.getElementById('thOff').value=data.thOff;document.getElementById('dOn').value=data.dOn;document.getElementById('dOff').value=data.dOff;}).catch(e=>console.log(e));
-fetch('/getbeepstatus').then(r=>r.json()).then(data=>{document.getElementById('beepEnabled').checked=data.enabled;document.getElementById('beepDuration').value=data.duration;document.getElementById('beepDurationDisplay').innerText=data.duration+'ms';});}
+fetch('/getbeepstatus').then(r=>r.json()).then(data=>{document.getElementById('beepEnabled').checked=data.enabled;document.getElementById('beepDuration').value=data.duration;document.getElementById('beepDurationDisplay').innerText=data.duration;});}
 function saveSeatSettings(){let auto=document.getElementById('seatAutoEnable').checked;let fwd=document.getElementById('forwardTime').value;let bwd=document.getElementById('backwardTime').value;let sleep=document.getElementById('sleepTime').value;let wake=document.getElementById('wakeTime').value;fetch('/setseatsettings?auto='+auto+'&fwd='+fwd+'&bwd='+bwd+'&sleep='+sleep+'&wake='+wake).then(()=>loadSettings());}
 function saveLDRSettings(){let en=document.getElementById('ldrEnabled').checked;let thOn=document.getElementById('thOn').value;let thOff=document.getElementById('thOff').value;let dOn=document.getElementById('dOn').value;let dOff=document.getElementById('dOff').value;fetch('/setldr?en='+en+'&thOn='+thOn+'&thOff='+thOff+'&dOn='+dOn+'&dOff='+dOff).then(()=>loadSettings());}
 function saveBeepSettings(){const enabled=document.getElementById('beepEnabled').checked;const duration=document.getElementById('beepDuration').value;if(duration<50||duration>1000){alert('⚠️ مدت زمان باید بین ۵۰ تا ۱۰۰۰ میلی‌ثانیه باشد!');return;}
-fetch('/togglebeep').then(()=>{fetch('/setbeepduration?duration='+duration).then(()=>{loadSettings();showToast('✅ تنظیمات بوق ذخیره شد!','success');});});}
+fetch('/setbeepenabled?enabled='+enabled).then(()=>{fetch('/setbeepduration?duration='+duration).then(()=>{loadSettings();showToast('✅ تنظیمات بوق ذخیره شد!','success');});});}
 function updatePCStatus(){fetch('/pcstatus').then(r=>r.json()).then(data=>{document.getElementById('lightLevel').innerHTML=data.light+' ('+data.percent+'%)';document.getElementById('relayState').innerHTML=data.state?'💡 روشن':'🌑 خاموش';}).catch(e=>console.log(e));}
 function showToast(message,type='success'){const oldMsg=document.querySelector('.toast-message');if(oldMsg)oldMsg.remove();const toast=document.createElement('div');toast.className='toast-message toast-'+type;toast.innerHTML=message;document.body.appendChild(toast);setTimeout(()=>{toast.style.opacity='0';setTimeout(()=>toast.remove(),300)},3000);}
 document.getElementById('ldrEnabled').addEventListener('change',saveLDRSettings);
@@ -748,6 +769,23 @@ void handleGetBeepStatus() {
     json += "\"duration\":" + String(relay8BeepDuration);
     json += "}";
     server.send(200, "application/json", json);
+}
+
+void handleSetBeepEnabled() {
+    if(!loggedIn || !isAdmin) {
+        server.send(403, "text/plain", "Forbidden");
+        return;
+    }
+
+    if(server.hasArg("enabled")) {
+        String enabled = server.arg("enabled");
+        relay8BeepEnabled = (enabled == "true" || enabled == "1" || enabled == "ON");
+        saveSettings();
+        server.send(200, "text/plain", relay8BeepEnabled ? "ON" : "OFF");
+        Serial.println("🔊 RELAY8 Beep set to: " + String(relay8BeepEnabled ? "ENABLED" : "DISABLED"));
+    } else {
+        server.send(400, "text/plain", "Missing enabled");
+    }
 }
 
 void handleSetBeepDuration() {
@@ -2388,12 +2426,12 @@ void setup() {
     esp_wifi_set_ps(WIFI_PS_NONE);  // غیرفعال کردن Power Save
     
     // تنظیمات کشور برای حداکثر کانال‌ها
-    wifi_country_t country = {
-        .cc = "US",
-        .schan = 1,
-        .nchan = 13,
-        .policy = WIFI_COUNTRY_POLICY_AUTO
-    };
+    wifi_country_t country;
+    memset(&country, 0, sizeof(country));
+    strcpy(country.cc, "US");
+    country.schan = 1;
+    country.nchan = 13;
+    country.policy = WIFI_COUNTRY_POLICY_AUTO;
     esp_wifi_set_country(&country);
     esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
     
@@ -2514,6 +2552,7 @@ void setup() {
     server.on("/getbuttonstatus", handleGetButtonStatus);
     server.on("/togglebeep", handleToggleBeep);
     server.on("/getbeepstatus", handleGetBeepStatus);
+    server.on("/setbeepenabled", handleSetBeepEnabled);
     server.on("/setbeepduration", handleSetBeepDuration);
     server.on("/filterchange", []() { server.send(200, "text/plain", "OK"); });
 
